@@ -673,6 +673,15 @@ function docker_cli_launch() {
 		skip_ci_special="yes" display_alert "-------------Docker run failed after ${SECONDS}s--------------------------" "🐳 failed" "err"
 	fi
 
+	# This build owns a unique '${DOCKER_ARMBIAN_INITIAL_IMAGE_TAG}' tag (one per build, so parallel
+	# builds on a shared daemon never collide). The container has exited (--rm), so remove our tag now —
+	# otherwise these per-build images pile up: they stay *tagged*, so neither 'docker image prune'
+	# (dangling-only) nor docker_cleanup_old_images() (which matches 'docker-armbian-build', not the
+	# local 'armbian.local.only/armbian-build' repo) ever reaps them. Removing our own unique tag can't
+	# disturb other in-flight builds, and shared base layers are kept. Ignore errors (the image may
+	# already be gone, e.g. reaped by host housekeeping).
+	run_host_command_logged docker image rm --force "${DOCKER_ARMBIAN_INITIAL_IMAGE_TAG}" "||" true
+
 	# Find and show the path to the log file for the ARMBIAN_BUILD_UUID.
 	local logs_path="${DEST}/logs" log_file
 	log_file="$(find "${logs_path}" -type f -name "*${ARMBIAN_BUILD_UUID}*.*" -print -quit)"
