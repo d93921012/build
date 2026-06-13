@@ -302,7 +302,31 @@ function prepare_partitions() {
 
 		check_loop_device "$rootdevice"
 		display_alert "Creating rootfs" "$ROOTFS_TYPE on $rootdevice"
-		run_host_command_logged mkfs.${mkfs[$ROOTFS_TYPE]} ${mkopts[$ROOTFS_TYPE]} ${mkopts_label[$ROOTFS_TYPE]:+${mkopts_label[$ROOTFS_TYPE]}"$ROOT_FS_LABEL"} "${rootdevice}"
+		# mkfs opens the target O_EXCL and fails with "apparently in use by the
+		# system; will not make a filesystem here!" while the kernel/udev is
+		# still probing the just-created partition (from the --partscan /
+		# partprobe above). On hosts running many parallel builds that probe
+		# window is hit often. Retry, re-probing the partition table between
+		# attempts. (udevadm settle can't help: the build is in a container with
+		# no udevd; the probing udevd lives on the host.)
+		#
+		# Loop devices are a global kernel resource shared by every container on
+		# the host, so before EACH attempt verify our loop still backs OUR raw
+		# image. If that mapping ever changed (device detached and re-grabbed by
+		# a sibling build) we must NOT write a filesystem — it would clobber the
+		# other build — so bail loudly instead of corrupting it.
+		declare -i _mkfs_attempt
+		for _mkfs_attempt in 1 2 3 4 5; do
+			if ! losetup -j "${SDCARD}.raw" 2> /dev/null | grep -q "^${LOOP}:"; then
+				exit_with_error "Loop ${LOOP} no longer backs ${SDCARD}.raw (reassigned under us?) — refusing to mkfs to avoid corrupting another build"
+			fi
+			skip_error_info="yes" run_host_command_logged mkfs.${mkfs[$ROOTFS_TYPE]} ${mkopts[$ROOTFS_TYPE]} ${mkopts_label[$ROOTFS_TYPE]:+${mkopts_label[$ROOTFS_TYPE]}"$ROOT_FS_LABEL"} "${rootdevice}" && break
+			[[ ${_mkfs_attempt} -ge 5 ]] && exit_with_error "mkfs on ${rootdevice} failed after ${_mkfs_attempt} attempts — device stayed busy"
+			display_alert "mkfs failed: device busy, re-probing and retrying" "${rootdevice} (attempt ${_mkfs_attempt})" "warn"
+			sleep 3
+			run_host_command_logged partprobe "${LOOP}" || true
+			check_loop_device "$rootdevice"
+		done
 
 		#
 		# BEGIN: Options for specific filesystems
